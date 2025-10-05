@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark light">
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
   <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b1220">
-  <title>HostelWorld Price Explorer · Australia</title>
+  <title>HostelWorld Price Explorer</title>
   <script>
     // Tailwind CDN config (media dark mode + soft shadows)
     window.tailwind = { config: { darkMode: 'media', theme: { extend: { boxShadow: { soft: '0 2px 10px rgba(0,0,0,.06), 0 1px 3px rgba(0,0,0,.06)' } } } } };
@@ -26,7 +26,7 @@
   <!-- Header -->
   <header class="sticky top-0 z-10 bg-gradient-to-r from-indigo-600 via-violet-600 to-fuchsia-600 text-white">
     <div class="max-w-6xl mx-auto px-4 py-5 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-      <h1 class="text-2xl md:text-3xl font-semibold tracking-tight">HostelWorld Price Explorer · Australia</h1>
+      <h1 class="text-2xl md:text-3xl font-semibold tracking-tight">HostelWorld Price Explorer</h1>
       <p class="text-sm/5 md:text-base text-white/90">Understand when dorms are cheap — at a glance.</p>
     </div>
   </header>
@@ -133,7 +133,7 @@
     </section>
 
     <footer class="text-xs text-slate-600 dark:text-slate-400 pt-2 md:pt-6">
-      <p>Data is loaded directly from <span class="font-mono">raw.githubusercontent.com/adverbdizzy7d/HW-AUS</span>. Timezone: Europe/Berlin.</p>
+      <p>Data is loaded directly from GitHub. Timezone: Europe/Berlin.</p>
     </footer>
   </main>
 
@@ -211,25 +211,31 @@ function showStatus(msg, type='info') {
 function hideStatus(){ document.getElementById('statusBox').classList.add('hidden'); }
 
 // ===== CSV loading =====
+const REPOS = ['adverbdizzy7d/HW-AUS', 'adverbdizzy7d/HW-NZL'];
+
 async function fetchCsvForProperty(propertyId) {
-  const candidates = [
-    `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/refs/heads/main/${propertyId}.csv`,
-    `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/main/${propertyId}.csv`,
-    `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/refs/heads/main/${propertyId}_prices_history.csv`,
-    `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/main/${propertyId}_prices_history.csv`,
-  ];
-  let lastErr = null;
-  for (const url of candidates) {
-    try {
-      const res = await fetch(url, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-      const text = await res.text();
-      const parsed = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
-      if (!parsed.data || !parsed.data.length) throw new Error('Empty CSV');
-      return { rows: parsed.data, sourceUrl: url };
-    } catch (e) { lastErr = e; }
+  const allCandidates = REPOS.flatMap(repo => [
+    //`https://raw.githubusercontent.com/${repo}/refs/heads/main/${propertyId}.csv`,
+    //`https://raw.githubusercontent.com/${repo}/main/${propertyId}.csv`,
+    `https://raw.githubusercontent.com/${repo}/refs/heads/main/${propertyId}_prices_history.csv`,
+    //`https://raw.githubusercontent.com/${repo}/main/${propertyId}_prices_history.csv`,
+  ]);
+
+  const fetchAndParse = async (url) => {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
+    const text = await res.text();
+    const parsed = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
+    if (!parsed.data || !parsed.data.length) throw new Error(`Empty CSV from ${url}`);
+    return { rows: parsed.data, sourceUrl: url };
+  };
+
+  try {
+    return await Promise.any(allCandidates.map(fetchAndParse));
+  } catch (e) {
+    console.error('All CSV fetches failed:', e.errors);
+    throw new Error('CSV not found in any repository');
   }
-  throw lastErr || new Error('CSV not found');
 }
 
 // ===== Transformations =====
@@ -256,36 +262,156 @@ function groupBy(arr, keyFn) {
 }
 
 // ===== Dorm name resolution via raw-data JSON =====
-async function fetchDormNamesFromRows(rows, propertyId) {
+function findOptimalJsonFiles(rows) {
+  // First, get all unique dorm IDs we need to resolve
+  const neededDormIds = new Set(rows.map(r => r.dormId));
+  
+  // Group rows by urlPart to find which JSON might contain which dorms
+  const byUrlPart = new Map();
+  for (const row of rows) {
+    if (!row.urlPart) continue;
+    if (!byUrlPart.has(row.urlPart)) {
+      byUrlPart.set(row.urlPart, {
+        dormIds: new Set(),
+        latestCrawl: row.crawledAt,
+        count: 0
+      });
+    }
+    const entry = byUrlPart.get(row.urlPart);
+    entry.dormIds.add(row.dormId);
+    entry.count++;
+    if (row.crawledAt > entry.latestCrawl) {
+      entry.latestCrawl = row.crawledAt;
+    }
+  }
+
+  // Sort urlParts by how many needed dorms they contain
+  const sortedParts = Array.from(byUrlPart.entries())
+    .sort((a, b) => {
+      // First by number of needed dorms contained
+      const aNeeded = new Set([...a[1].dormIds].filter(id => neededDormIds.has(id))).size;
+      const bNeeded = new Set([...b[1].dormIds].filter(id => neededDormIds.has(id))).size;
+      if (bNeeded !== aNeeded) return bNeeded - aNeeded;
+      // Then by recency (latest crawl time)
+      return b[1].latestCrawl - a[1].latestCrawl;
+    });
+
+  // Build minimal set of files needed to resolve all dorms
+  const result = [];
+  const resolvedDormIds = new Set();
+  
+  for (const [urlPart, info] of sortedParts) {
+    // Check if this urlPart contains any dorms we still need
+    const newDorms = new Set([...info.dormIds].filter(id => 
+      neededDormIds.has(id) && !resolvedDormIds.has(id)
+    ));
+    
+    if (newDorms.size > 0) {
+      result.push({
+        urlPart,
+        newDormIds: newDorms,
+        crawledAt: info.latestCrawl
+      });
+      for (const id of newDorms) resolvedDormIds.add(id);
+    }
+
+    // Stop if we found all needed dorms
+    if (resolvedDormIds.size === neededDormIds.size) break;
+  }
+
+  return {
+    files: result,
+    totalNeeded: neededDormIds.size,
+    resolved: resolvedDormIds.size
+  };
+}
+
+async function fetchDormNamesFromRows(rows, propertyId, sourceUrl) {
   try {
-    const latest = rows.reduce((a,b)=> (!a || (b.crawledAt > a.crawledAt) ? b : a), null);
-    if (!latest || !latest.urlPart) return new Map();
-    const baseCandidates = [
-      `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/refs/heads/raw-data/raw/${latest.urlPart}`,
-      `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/raw-data/raw/${latest.urlPart}`,
-    ];
-    let json = null, lastErr = null;
-    for (const u of baseCandidates) {
-      try {
-        const res = await fetch(u, { cache: 'no-store' });
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        json = await res.json();
-        break;
-      } catch(e){ lastErr = e; }
+    const repoFromUrl = sourceUrl.match(/raw\.githubusercontent\.com\/([^/]+\/[^/]+)\//)?.[1];
+    const reposToTry = repoFromUrl ? [repoFromUrl, ...REPOS.filter(r => r !== repoFromUrl)] : REPOS;
+    
+    // Find optimal set of JSON files to fetch
+    const plan = findOptimalJsonFiles(rows);
+    console.log(`Need to resolve ${plan.totalNeeded} dorm names, found ${plan.resolved} in ${plan.files.length} files`);
+    
+    // Fetch and process each needed file
+    const names = new Map();
+    for (const file of plan.files) {
+      for (const repo of reposToTry) {
+        const urls = [
+          `https://raw.githubusercontent.com/${repo}/refs/heads/raw-data/raw/${file.urlPart}`,
+          //`https://raw.githubusercontent.com/${repo}/raw-data/raw/${file.urlPart}`,
+        ];
+        
+        for (const url of urls) {
+          try {
+            const res = await fetch(url, { cache: 'no-store' });
+            if (!res.ok) continue;
+            const json = await res.json();
+            
+            // Extract dorm names from JSON
+            const dorms = json?.rooms?.dorms || [];
+            for (const d of dorms) {
+              if (d.id && file.newDormIds.has(String(d.id))) {
+                const name = d.name || d.roomName || d.title || `Dorm ${d.id}`;
+                names.set(String(d.id), String(name));
+              }
+            }
+            
+            // If we successfully processed this file, move to next one
+            break;
+          } catch(e) {
+            console.warn(`Failed to fetch/parse ${url}:`, e);
+            continue;
+          }
+        }
+      }
     }
-    if (!json) throw lastErr || new Error('raw-data JSON not found');
-    const map = new Map();
-    // Typical layout: json.rooms.dorms[] with { id, name }
-    const dorms = json?.rooms?.dorms || [];
-    for (const d of dorms) {
-      const name = d.name || d.roomName || d.title || `Dorm ${d.id}`;
-      if (d.id) map.set(String(d.id), String(name));
-    }
-    return map;
+    
+    return names;
   } catch (e) {
-    console.warn('Failed to resolve dorm names from raw JSON', e);
+    console.warn('Failed to resolve dorm names:', e);
     return new Map();
   }
+}
+
+// Add this function after fetchDormNamesFromRows
+async function fetchPropertyName(propertyId, sourceUrl) {
+  try {
+    const repoFromUrl = sourceUrl.match(/raw\.githubusercontent\.com\/([^/]+\/[^/]+)\//)?.[1];
+    const reposToTry = repoFromUrl ? [repoFromUrl, ...REPOS.filter(r => r !== repoFromUrl)] : REPOS;
+    
+    // Try to get the latest property JSON
+    for (const repo of reposToTry) {
+      try {
+        // Try to get the property history first to find latest JSON
+        const historyUrl = `https://raw.githubusercontent.com/${repo}/refs/heads/raw-data/${propertyId}_property_history.csv`;
+        const historyRes = await fetch(historyUrl, { cache: 'no-store' });
+        if (historyRes.ok) {
+          const text = await historyRes.text();
+          const parsed = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
+          if (parsed.data && parsed.data.length) {
+            // Get latest JSON URL from history
+            const latest = parsed.data.sort((a,b) => b.crawledAt - a.crawledAt)[0];
+            if (latest?.urlPart) {
+              const jsonUrl = `https://raw.githubusercontent.com/${repo}/refs/heads/raw-data/raw/${latest.urlPart}`;
+              const jsonRes = await fetch(jsonUrl, { cache: 'no-store' });
+              if (jsonRes.ok) {
+                const json = await jsonRes.json();
+                if (json?.name) return json.name;
+              }
+            }
+          }
+        }
+      } catch(e) {
+        console.warn(`Failed to get property name from ${repo}:`, e);
+      }
+    }
+  } catch(e) {
+    console.warn('Failed to resolve property name:', e);
+  }
+  return null;
 }
 
 // ===== With check-in: build time-series per crawl =====
@@ -295,21 +421,62 @@ function seriesForStay(rows, stayDates) {
   for (const [dormId, items] of byDorm) {
     const byCrawl = groupBy(items, r => r.crawledAt);
     const points = [];
+    
     for (const [crawlTs, list] of byCrawl) {
+      const localDate = new Date(Number(crawlTs) * 1000);
       const byDate = groupBy(list, r => r.date);
       let total = 0;
       let currency = list[0].priceCurrency || 'AUD';
-      for (const [dt, entries] of byDate) {
+      let unavailableDates = [];
+      
+      // Check availability for each required date
+      for (const date of stayDates) {
+        const entries = byDate.get(date) || [];
+        if (entries.length === 0) {
+          unavailableDates.push(date);
+          continue;
+        }
         const minForDate = Math.min(...entries.map(e => e.priceValue));
         total += minForDate;
       }
-      points.push({ x: new Date(Number(crawlTs)*1000), y: total, currency });
+      
+      // Only add point if we have prices for all dates
+      if (unavailableDates.length === 0) {
+        points.push({ x: localDate, y: total, currency, available: true });
+      } else {
+        points.push({ 
+          x: localDate, 
+          y: null, 
+          currency,
+          available: false,
+          unavailableDates
+        });
+      }
     }
-    points.sort((a,b)=>a.x - b.x);
-    const ys = points.map(p=>p.y);
-    out.push({ dormId, points, min: Math.min(...ys), max: Math.max(...ys), first: points[0]?.y ?? NaN, last: points.at(-1)?.y ?? NaN, currency: points[0]?.currency || 'AUD' });
+    
+    points.sort((a,b) => a.x - b.x);
+    const availablePoints = points.filter(p => p.available);
+    const ys = availablePoints.map(p => p.y);
+    
+    // Get current availability status
+    const lastPoint = points[points.length - 1];
+    const currentlyAvailable = lastPoint?.available ?? false;
+    const lastAvailablePrice = availablePoints[availablePoints.length - 1]?.y;
+    
+    out.push({ 
+      dormId, 
+      points,
+      min: ys.length > 0 ? Math.min(...ys) : null,
+      max: ys.length > 0 ? Math.max(...ys) : null,
+      first: availablePoints[0]?.y ?? null,
+      last: lastAvailablePrice ?? null,
+      currency: points[0]?.currency || 'AUD',
+      currentlyAvailable,
+      everAvailable: availablePoints.length > 0,
+      lastUnavailableDates: !currentlyAvailable ? lastPoint?.unavailableDates : null
+    });
   }
-  return out.sort((a,b)=> a.dormId.localeCompare(b.dormId));
+  return out.sort((a,b) => a.dormId.localeCompare(b.dormId));
 }
 
 // ===== Without check-in: 14-day min/max per date =====
@@ -355,14 +522,21 @@ function computeYDomainFromArrays(arrays) {
 function renderCrawlChart(series, dormNames) {
   const ctx = document.getElementById('crawlChart').getContext('2d');
   if (crawlChart) { crawlChart.destroy(); }
+  
   const datasets = series.map(s => ({
     label: dormNames.get(String(s.dormId)) || `Dorm ${s.dormId}`,
-    data: s.points.map(p => ({ x: p.x, y: p.y })),
+    data: s.points.map(p => ({ 
+      x: p.x, 
+      y: p.y 
+    })),
     fill: false,
     tension: 0.25,
+    spanGaps: true // Allow gaps for unavailable dates
   }));
+  
   const currency = series[0]?.currency || 'AUD';
-  const domain = computeYDomainFromArrays(datasets.map(d => d.data.map(p => p.y)));
+  const domain = computeYDomainFromArrays(datasets.map(d => d.data.map(p => p.y).filter(y => y !== null)));
+  
   crawlChart = new Chart(ctx, {
     type: 'line',
     data: { datasets },
@@ -371,12 +545,56 @@ function renderCrawlChart(series, dormNames) {
       responsive: true,
       interaction: { mode: 'nearest', intersect: false },
       plugins: {
-        legend: { position: 'bottom' },
-        tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${fmtMoney(ctx.parsed.y, currency)} @ ${new Date(ctx.parsed.x).toLocaleString(userLocale)}` } }
+        legend: { 
+          position: 'bottom',
+          // Nach Änderung der Sichtbarkeit Y-Achse neu berechnen
+          onClick: (evt, legendItem, legend) => {
+            const index = legendItem.datasetIndex;
+            const chart = legend.chart;
+            chart.getDatasetMeta(index).hidden = !chart.getDatasetMeta(index).hidden;
+            
+            // Berechne neue Y-Achsen Grenzen nur für sichtbare Datensätze
+            const visibleData = datasets
+              .filter((d, i) => !chart.getDatasetMeta(i).hidden)
+              .map(d => d.data.map(p => p.y));
+            
+            if (visibleData.length > 0) {
+              const newDomain = computeYDomainFromArrays(visibleData);
+              chart.options.scales.y.min = newDomain.min;
+              chart.options.scales.y.max = newDomain.max;
+            }
+            
+            chart.update();
+          }
+        },
+        tooltip: { 
+          callbacks: { 
+            label: (ctx) => {
+              const localTime = ctx.raw.x.toLocaleString(userLocale);
+              return `${ctx.dataset.label}: ${fmtMoney(ctx.parsed.y, currency)} @ ${localTime}`;
+            }
+          }
+        }
       },
       scales: {
-        x: { type: 'time', time: { tooltipFormat: 'PP HH:mm' } },
-        y: { min: domain.min, max: domain.max, ticks: { callback: (v)=>fmtMoney(v, currency) } }
+        x: { 
+          type: 'time',
+          time: { 
+            tooltipFormat: 'PP HH:mm',
+            displayFormats: {
+              datetime: 'PP HH:mm',
+              millisecond: 'HH:mm:ss.SSS',
+              second: 'HH:mm:ss',
+              minute: 'HH:mm',
+              hour: 'HH:mm'
+            }
+          }
+        },
+        y: { 
+          min: domain.min, 
+          max: domain.max, 
+          ticks: { callback: (v)=>fmtMoney(v, currency) }
+        }
       }
     }
   });
@@ -393,14 +611,15 @@ function renderSpanChart(dayRows, dormId, dormName) {
   spanChart = new Chart(ctx, {
     type: 'line',
     data: { labels, datasets: [
-      { label: `Min (${dormName})`, data: minVals, spanGaps: true, tension: 0.25 },
-      { label: `Max (${dormName})`, data: maxVals, spanGaps: true, tension: 0.25 },
+      { label: `Min`, data: minVals, spanGaps: true, tension: 0.25 },
+      { label: `Max`, data: maxVals, spanGaps: true, tension: 0.25 },
     ]},
     options: {
       maintainAspectRatio: false,
       responsive: true,
       interaction: { mode: 'index', intersect: false },
       plugins: {
+        title: { display: true, text: dormName },
         legend: { position: 'bottom' },
         tooltip: { callbacks: { label: (ctx)=> `${ctx.dataset.label}: ${fmtMoney(ctx.parsed.y, currency)}` } }
       },
@@ -416,12 +635,22 @@ function renderWithDatesTable(series, dormNames) {
   for (const s of series) {
     const tr = document.createElement('tr');
     const label = dormNames.get(String(s.dormId)) || `Dorm ${s.dormId}`;
+    const availabilityClass = s.currentlyAvailable ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400';
+    const availabilityText = s.currentlyAvailable ? 
+      'Available' : 
+      (s.everAvailable ? 
+        `Not available (dates: ${s.lastUnavailableDates.join(', ')})` : 
+        'Never available');
+    
     tr.innerHTML = `
-      <td class="p-2">${label}</td>
-      <td class="p-2 text-right">${fmtMoney(s.min, s.currency)}</td>
-      <td class="p-2 text-right">${fmtMoney(s.max, s.currency)}</td>
-      <td class="p-2 text-right">${fmtMoney(s.last, s.currency)}</td>
-      <td class="p-2 text-right">${fmtMoney(s.first, s.currency)}</td>
+      <td class="p-2">
+        ${label}
+        <div class="text-xs ${availabilityClass}">${availabilityText}</div>
+      </td>
+      <td class="p-2 text-right">${s.min !== null ? fmtMoney(s.min, s.currency) : '–'}</td>
+      <td class="p-2 text-right">${s.max !== null ? fmtMoney(s.max, s.currency) : '–'}</td>
+      <td class="p-2 text-right">${s.last !== null ? fmtMoney(s.last, s.currency) : '–'}</td>
+      <td class="p-2 text-right">${s.first !== null ? fmtMoney(s.first, s.currency) : '–'}</td>
     `;
     tb.appendChild(tr);
   }
@@ -481,9 +710,278 @@ function bootstrapFromQuery() {
   } catch {}
 }
 
-// ===== Main flow =====
-let lastDormNames = new Map();
+// ===== Property History Tracking =====
+async function fetchPropertyHistory(propertyId) {
+  const allCandidates = REPOS.flatMap(repo => [
+    `https://raw.githubusercontent.com/${repo}/refs/heads/raw-data/${propertyId}_property_history.csv`,
+  ]);
 
+  const fetchAndParse = async (url) => {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
+    const text = await res.text();
+    const parsed = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
+    if (!parsed.data || !parsed.data.length) throw new Error(`Empty CSV from ${url}`);
+    
+    // Filter to last 30 days
+    const thirtyDaysAgo = Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
+    const filteredRows = parsed.data.filter(row => row.crawledAt >= thirtyDaysAgo);
+    
+    return { 
+      rows: filteredRows.sort((a,b) => b.crawledAt - a.crawledAt),
+      sourceUrl: url,
+      totalRows: parsed.data.length,
+      filteredRows: filteredRows.length
+    };
+  };
+
+  try {
+    return await Promise.any(allCandidates.map(fetchAndParse));
+  } catch (e) {
+    console.error('Property history CSV fetch failed:', e.errors);
+    throw new Error('Property history not found');
+  }
+}
+
+function compareObjects(prev, curr) {
+  const changes = [];
+  const seen = new Set();
+
+  function recordChange(path, oldVal, newVal) {
+    changes.push({
+      path: path.join('.'),
+      old: oldVal,
+      new: newVal,
+      type: oldVal === undefined ? 'added' : newVal === undefined ? 'removed' : 'changed'
+    });
+  }
+
+  function traverse(a, b, path = []) {
+    if (a === b) return;
+    const pathKey = path.join('.');
+    if (seen.has(pathKey)) return;
+    seen.add(pathKey);
+
+    if (Array.isArray(a) && Array.isArray(b)) {
+      // Special handling for promotions array - compare by ID
+      if (path[path.length-1] === 'promotions') {
+        const aMap = new Map(a.map(p => [p.id, p]));
+        const bMap = new Map(b.map(p => [p.id, p]));
+        
+        // Find removed and changed promotions
+        for (const [id, promoA] of aMap) {
+          const promoB = bMap.get(id);
+          if (!promoB) {
+            recordChange([...path, id], promoA, undefined);
+          } else if (JSON.stringify(promoA) !== JSON.stringify(promoB)) {
+            recordChange([...path, id], promoA, promoB);
+          }
+        }
+        
+        // Find new promotions
+        for (const [id, promoB] of bMap) {
+          if (!aMap.has(id)) {
+            recordChange([...path, id], undefined, promoB);
+          }
+        }
+        return;
+      }
+      
+      // For other arrays, compare elements directly
+      const len = Math.max(a.length, b.length);
+      for (let i = 0; i < len; i++) {
+        traverse(a[i], b[i], [...path, i]);
+      }
+      return;
+    }
+
+    if (a && b && typeof a === 'object' && typeof b === 'object') {
+      const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+      for (const key of keys) {
+        traverse(a[key], b[key], [...path, key]);
+      }
+      return;
+    }
+
+    if (a !== b) {
+      recordChange(path, a, b);
+    }
+  }
+
+  traverse(prev, curr);
+  return changes;
+}
+
+function formatValue(v) {
+  if (v === undefined) return '(undefined)';
+  if (v === null) return '(null)';
+  if (typeof v === 'object') return JSON.stringify(v, null, 2);
+  return String(v);
+}
+
+async function fetchAndComparePropertyVersions(propertyId, history) {
+  const repoFromUrl = history.sourceUrl.match(/raw\.githubusercontent\.com\/([^/]+\/[^/]+)\//)?.[1];
+  const reposToTry = repoFromUrl ? [repoFromUrl, ...REPOS.filter(r => r !== repoFromUrl)] : REPOS;
+  
+  // Track promotions by ID
+  const promotionHistory = new Map(); // promoId -> {versions: [{json, start, end}]}
+  
+  // Process all versions chronologically (oldest first)
+  const sortedEntries = [...history.rows].sort((a,b) => a.crawledAt - b.crawledAt);
+  
+  for (const entry of sortedEntries) {
+    for (const repo of reposToTry) {
+      try {
+        const url = `https://raw.githubusercontent.com/${repo}/refs/heads/raw-data/raw/${entry.urlPart}`;
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) continue;
+        const json = await res.json();
+        
+        // Extract promotions
+        const promotions = json.promotions || [];
+        for (const promo of promotions) {
+          if (!promotionHistory.has(promo.id)) {
+            promotionHistory.set(promo.id, { versions: [] });
+          }
+          const history = promotionHistory.get(promo.id);
+          const lastVersion = history.versions[history.versions.length - 1];
+          
+          // Check if this is a new version
+          if (!lastVersion || JSON.stringify(lastVersion.json) !== JSON.stringify(promo)) {
+            // Close previous version if exists
+            if (lastVersion) {
+              lastVersion.end = entry.crawledAt;
+            }
+            // Start new version
+            history.versions.push({
+              json: promo,
+              start: entry.crawledAt,
+              end: null // will be set when a new version is found or at the end
+            });
+          }
+        }
+        break;
+      } catch(e) {
+        console.warn(`Failed to fetch/parse property JSON from ${repo}:`, e);
+        continue;
+      }
+    }
+  }
+  
+  // Close end dates for last versions
+  const lastCrawl = Math.max(...history.rows.map(r => r.crawledAt));
+  for (const history of promotionHistory.values()) {
+    const lastVersion = history.versions[history.versions.length - 1];
+    if (lastVersion && !lastVersion.end) {
+      lastVersion.end = lastCrawl;
+    }
+  }
+  
+  return promotionHistory;
+}
+
+function formatPromotion(promo) {
+  return JSON.stringify(promo, null, 2)
+    .split('\n')
+    .map(line => `    ${line}`)
+    .join('\n');
+}
+
+function formatTimestamp(ts) {
+  return new Date(ts * 1000).toLocaleString(userLocale);
+}
+
+function formatDateRange(start, end) {
+  return `${formatTimestamp(start)} → ${end ? formatTimestamp(end) : 'now'}`;
+}
+
+function renderPropertyHistory(promotionHistory) {
+  let section = document.getElementById('propertyHistory');
+  if (!section) {
+    section = document.createElement('section');
+    section.id = 'propertyHistory';
+    section.className = 'bg-white dark:bg-slate-900 rounded-2xl p-4 md:p-6 shadow-soft space-y-4';
+    document.querySelector('main').insertBefore(section, document.querySelector('footer'));
+  }
+  
+  const promotions = Array.from(promotionHistory.entries())
+    .sort(([idA], [idB]) => idA - idB);
+  
+  section.innerHTML = `
+    <h2 class="text-xl md:text-2xl font-semibold">Promotions History</h2>
+    <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">Showing changes from the last 30 days</p>
+    <div class="space-y-6">
+      ${promotions.map(([id, history]) => `
+        <div class="border border-slate-200 dark:border-slate-700 rounded-xl p-4">
+          <h3 class="text-lg font-medium mb-2">Promotion ID: ${id}</h3>
+          <div class="space-y-4 font-mono text-sm">
+            ${history.versions.map((v, i) => `
+              <div class="relative">
+                <div class="text-slate-500 dark:text-slate-400 mb-1">${formatDateRange(v.start, v.end)}</div>
+                <pre class="bg-slate-50 dark:bg-slate-800/50 rounded p-2 overflow-x-auto">${formatPromotion(v.json)}</pre>
+                ${i < history.versions.length - 1 ? `
+                  <div class="text-amber-600 dark:text-amber-400 mt-2">
+                    Changes in next version:
+                    <pre class="bg-slate-50 dark:bg-slate-800/50 rounded p-2 mt-1">${highlightChanges(v.json, history.versions[i + 1].json)}</pre>
+                  </div>
+                ` : ''}
+              </div>
+            `).join('\n')}
+          </div>
+        </div>
+      `).join('\n')}
+    </div>
+  `;
+  section.classList.remove('hidden');
+}
+
+function highlightChanges(oldJson, newJson) {
+  const changes = [];
+  
+  function compareObjects(path, a, b) {
+    if (a === b) return;
+    
+    if (typeof a !== typeof b) {
+      changes.push(`${path}: ${JSON.stringify(a)} → ${JSON.stringify(b)}`);
+      return;
+    }
+    
+    if (typeof a !== 'object' || a === null || b === null) {
+      if (a !== b) changes.push(`${path}: ${JSON.stringify(a)} → ${JSON.stringify(b)}`);
+      return;
+    }
+    
+    if (Array.isArray(a)) {
+      if (!Array.isArray(b)) {
+        changes.push(`${path}: array → non-array`);
+        return;
+      }
+      for (let i = 0; i < Math.max(a.length, b.length); i++) {
+        if (i >= a.length) changes.push(`${path}[${i}]: (added) ${JSON.stringify(b[i])}`);
+        else if (i >= b.length) changes.push(`${path}[${i}]: (removed) ${JSON.stringify(a[i])}`);
+        else compareObjects(`${path}[${i}]`, a[i], b[i]);
+      }
+      return;
+    }
+    
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+    for (const key of keys) {
+      if (!(key in a)) changes.push(`${path}.${key}: (added) ${JSON.stringify(b[key])}`);
+      else if (!(key in b)) changes.push(`${path}.${key}: (removed) ${JSON.stringify(a[key])}`);
+      else compareObjects(`${path}.${key}`, a[key], b[key]);
+    }
+  }
+  
+  compareObjects('', oldJson, newJson);
+  return changes.join('\n');
+}
+
+// ===== Init =====
+const form = document.getElementById('inputForm');
+form.addEventListener('submit', (e) => { e.preventDefault(); runAnalysis(); });
+bootstrapFromQuery();
+
+// ===== Main analysis function =====
 async function runAnalysis() {
   hideStatus();
   document.getElementById('withDates').classList.add('hidden');
@@ -535,7 +1033,27 @@ async function runAnalysis() {
   document.getElementById('summary').classList.remove('hidden');
 
   // Resolve dorm names from latest raw-data JSON (best-effort)
-  lastDormNames = await fetchDormNamesFromRows(rows, propertyId);
+  const rawDormNames = await fetchDormNamesFromRows(rows, propertyId, sourceUrl);
+  lastDormNames = new Map();
+  for (const [id, name] of rawDormNames.entries()) {
+    lastDormNames.set(id, `${name} (${id})`);
+  }
+  const getDormLabel = (id) => lastDormNames.get(String(id)) || `Dorm ${id}`;
+
+
+  // Get property name and update title
+  try {
+    const propertyName = await fetchPropertyName(propertyId, sourceUrl);
+    if (propertyName) {
+      document.title = `${propertyName} - HostelWorld Price Explorer`;
+      document.querySelector('h1').innerHTML = `
+        ${propertyName}
+        <div class="text-sm font-normal text-white/75">HostelWorld Price Explorer</div>
+      `;
+    }
+  } catch(e) {
+    console.warn('Could not fetch property name:', e);
+  }
 
   // Update URL for refresh/share
   if (effectiveCheckin) {
@@ -560,7 +1078,7 @@ async function runAnalysis() {
     const select = document.getElementById('dormSelect');
     select.innerHTML = '';
     for (const d of dormIds) {
-      const label = lastDormNames.get(String(d)) || `Dorm ${d}`;
+      const label = getDormLabel(d);
       const opt = document.createElement('option');
       opt.value = d; opt.textContent = label;
       select.appendChild(opt);
@@ -571,7 +1089,7 @@ async function runAnalysis() {
       return;
     }
     const rowsForDorm = agg.byDorm.get(pick);
-    const label = lastDormNames.get(String(pick)) || `Dorm ${pick}`;
+    const label = getDormLabel(pick);
     renderSpanChart(rowsForDorm, pick, label);
     renderNoDatesTable(rowsForDorm);
     document.getElementById('noDates').classList.remove('hidden');
@@ -579,17 +1097,21 @@ async function runAnalysis() {
     select.onchange = () => {
       const d = select.value;
       const r = agg.byDorm.get(d) || [];
-      const lbl = lastDormNames.get(String(d)) || `Dorm ${d}`;
+      const lbl = getDormLabel(d);
       renderSpanChart(r, d, lbl);  // will recompute Y-domain so the graph isn't squashed
       renderNoDatesTable(r);
     };
   }
-}
 
-// Init
-const form = document.getElementById('inputForm');
-form.addEventListener('submit', (e) => { e.preventDefault(); runAnalysis(); });
-bootstrapFromQuery();
+  // After loading price data, also load property history
+  try {
+    const historyRes = await fetchPropertyHistory(propertyId);
+    const versions = await fetchAndComparePropertyVersions(propertyId, historyRes);
+    renderPropertyHistory(versions);
+  } catch (e) {
+    console.warn('Could not load property history:', e);
+  }
+}
 </script>
 </body>
 </html>
