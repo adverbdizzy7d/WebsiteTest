@@ -1,13 +1,595 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Meine GitHub Page</title>
-  <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b1220">
+  <title>HostelWorld Price Explorer · Australia</title>
+  <script>
+    // Tailwind CDN config (media dark mode + soft shadows)
+    window.tailwind = { config: { darkMode: 'media', theme: { extend: { boxShadow: { soft: '0 2px 10px rgba(0,0,0,.06), 0 1px 3px rgba(0,0,0,.06)' } } } } };
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+  <style>
+    .scroll-shadow { box-shadow: inset 0 -8px 8px -8px rgba(0,0,0,.15); }
+    @media (prefers-color-scheme: dark) {
+      .scroll-shadow { box-shadow: inset 0 -8px 8px -8px rgba(255,255,255,.08); }
+    }
+  </style>
 </head>
-<body>
-  <h1>Hallo Welt!</h1>
-  <p>Das ist meine erste GitHub Page 🎉</p>
+<body class="bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+  <!-- Header -->
+  <header class="sticky top-0 z-10 bg-gradient-to-r from-indigo-600 via-violet-600 to-fuchsia-600 text-white">
+    <div class="max-w-6xl mx-auto px-4 py-5 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+      <h1 class="text-2xl md:text-3xl font-semibold tracking-tight">HostelWorld Price Explorer · Australia</h1>
+      <p class="text-sm/5 md:text-base text-white/90">Understand when dorms are cheap — at a glance.</p>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-4 py-6 space-y-6">
+    <!-- Input card -->
+    <section class="bg-white dark:bg-slate-900 rounded-2xl p-4 md:p-6 shadow-soft">
+      <form id="inputForm" class="grid grid-cols-1 md:grid-cols-12 gap-3 md:gap-4 items-end" autocomplete="off">
+        <div class="md:col-span-7">
+          <label class="block text-sm font-medium mb-1" for="urlInput">Hostelworld URL <span class="text-slate-500 dark:text-slate-400 font-normal">(or Property ID)</span></label>
+          <input id="urlInput" inputmode="url" autocapitalize="none" spellcheck="false" autocomplete="off" autofocus
+                 placeholder="e.g. https://www.hostelworld.com/pwa/hosteldetails.php/.../285693?... or 285693"
+                 class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2.5 focus:border-indigo-500 focus:ring-indigo-500" />
+        </div>
+        <div class="md:col-span-3">
+          <label class="block text-sm font-medium mb-1" for="checkin">Check‑in (optional)</label>
+          <input id="checkin" type="date" class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2.5 focus:border-indigo-500 focus:ring-indigo-500" />
+        </div>
+        <div class="md:col-span-1">
+          <label class="block text-sm font-medium mb-1" for="nights">Nights</label>
+          <input id="nights" type="number" min="1" max="30" value="1" class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2.5 focus:border-indigo-500 focus:ring-indigo-500" />
+        </div>
+        <div class="md:col-span-1 flex gap-2">
+          <button id="analyzeBtn" type="submit" class="w-full rounded-xl bg-indigo-600 text-white px-3 py-3 font-medium hover:bg-indigo-700 active:bg-indigo-800 transition">Analyze</button>
+        </div>
+      </form>
+      <p class="text-xs text-slate-600 dark:text-slate-400 mt-2">Tip: If the Hostelworld URL contains <code>?from=YYYY-MM-DD&to=YYYY-MM-DD</code>, check‑in & nights are auto‑detected. The page URL will be updated so you can refresh or share it.</p>
+    </section>
+
+    <!-- Status / errors -->
+    <section id="statusBox" class="hidden bg-amber-50 border border-amber-200 text-amber-900 dark:bg-amber-900/20 dark:border-amber-900/40 dark:text-amber-200 rounded-2xl p-4"></section>
+
+    <!-- Summary -->
+    <section id="summary" class="hidden bg-white dark:bg-slate-900 rounded-2xl p-4 md:p-6 shadow-soft">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
+        <div class="rounded-xl border border-slate-200 dark:border-slate-800 p-3">
+          <div class="text-xs text-slate-500 dark:text-slate-400">Property ID</div>
+          <div id="sumPropertyId" class="text-lg font-semibold">–</div>
+        </div>
+        <div class="rounded-xl border border-slate-200 dark:border-slate-800 p-3">
+          <div class="text-xs text-slate-500 dark:text-slate-400">Currency</div>
+          <div id="sumCurrency" class="text-lg font-semibold">–</div>
+        </div>
+        <div class="rounded-xl border border-slate-200 dark:border-slate-800 p-3">
+          <div class="text-xs text-slate-500 dark:text-slate-400">Rows</div>
+          <div id="sumRows" class="text-lg font-semibold">–</div>
+        </div>
+        <div class="rounded-xl border border-slate-200 dark:border-slate-800 p-3">
+          <div class="text-xs text-slate-500 dark:text-slate-400">Source</div>
+          <div class="text-sm"><a id="sumSourceLink" href="#" target="_blank" class="text-indigo-600 dark:text-indigo-400 underline underline-offset-2">Open CSV</a></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- With dates: crawl-time evolution for the stay -->
+    <section id="withDates" class="hidden bg-white dark:bg-slate-900 rounded-2xl p-4 md:p-6 shadow-soft space-y-4">
+      <h2 class="text-xl md:text-2xl font-semibold">Price evolution per dorm (by crawl time)</h2>
+      <p class="text-sm text-slate-600 dark:text-slate-400">For your stay, each point shows the cheapest observed total (min per night across plans, then summed) at that crawl time. X = crawl time, Y = total stay price per dorm.</p>
+      <div class="bg-slate-50 dark:bg-slate-800/40 rounded-xl p-3 h-[320px] md:h-[380px]">
+        <canvas id="crawlChart" aria-label="Crawl-time price chart" role="img"></canvas>
+      </div>
+      <div class="overflow-x-auto scroll-shadow rounded-xl border border-slate-200 dark:border-slate-800">
+        <table class="min-w-full text-sm">
+          <thead class="bg-slate-100 dark:bg-slate-800/60">
+            <tr>
+              <th class="text-left p-2">Dorm</th>
+              <th class="text-right p-2">Min total</th>
+              <th class="text-right p-2">Max total</th>
+              <th class="text-right p-2">Last crawl</th>
+              <th class="text-right p-2">First crawl</th>
+            </tr>
+          </thead>
+          <tbody id="withDatesTable"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- No dates: 14-day min/max per booking date -->
+    <section id="noDates" class="hidden bg-white dark:bg-slate-900 rounded-2xl p-4 md:p-6 shadow-soft space-y-4">
+      <h2 class="text-xl md:text-2xl font-semibold">14‑day range (min/max) per booking date</h2>
+      <div class="flex flex-col md:flex-row gap-3 md:items-end">
+        <div class="md:w-96">
+          <label class="block text-sm font-medium mb-1" for="dormSelect">Dorm</label>
+          <select id="dormSelect" class="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2.5 focus:border-indigo-500 focus:ring-indigo-500"></select>
+        </div>
+        <div class="text-sm text-slate-600 dark:text-slate-400">Window: next 14 days from today.</div>
+      </div>
+      <div class="bg-slate-50 dark:bg-slate-800/40 rounded-xl p-3 h-[320px] md:h-[380px]">
+        <canvas id="spanChart" aria-label="14-day min/max chart" role="img"></canvas>
+      </div>
+      <div class="overflow-x-auto scroll-shadow rounded-xl border border-slate-200 dark:border-slate-800">
+        <table class="min-w-full text-sm">
+          <thead class="bg-slate-100 dark:bg-slate-800/60">
+            <tr>
+              <th class="text-left p-2">Date</th>
+              <th class="text-right p-2">Min</th>
+              <th class="text-right p-2">Max</th>
+              <th class="text-right p-2">Range</th>
+            </tr>
+          </thead>
+          <tbody id="noDatesTable"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="text-xs text-slate-600 dark:text-slate-400 pt-2 md:pt-6">
+      <p>Data is loaded directly from <span class="font-mono">raw.githubusercontent.com/adverbdizzy7d/HW-AUS</span>. Timezone: Europe/Berlin.</p>
+    </footer>
+  </main>
+
+<script>
+// ===== Locale helpers =====
+const userLocale = navigator.language || 'en-US';
+const fmtMoney = (v, c = 'AUD') => {
+  const n = Number.isFinite(v) ? v : NaN;
+  if (!Number.isFinite(n)) return '–';
+  return new Intl.NumberFormat(userLocale, { style: 'currency', currency: c }).format(n);
+};
+const pad2 = (n) => String(n).padStart(2, '0');
+const toDateStr = (d) => `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+const addDaysStr = (dateStr, days) => {
+  const [y,m,d] = dateStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m-1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return `${dt.getUTCFullYear()}-${pad2(dt.getUTCMonth()+1)}-${pad2(dt.getUTCDate())}`;
+};
+const rangeDates = (startStr, nights) => {
+  const n = Math.max(1, Math.min(30, Number(nights)||1));
+  return Array.from({length:n}, (_,i)=> addDaysStr(startStr, i));
+};
+
+function parseUrlForDates(u) {
+  try {
+    const url = new URL(u);
+    const from = url.searchParams.get('from') || url.searchParams.get('dateFrom') || url.searchParams.get('checkin');
+    const to   = url.searchParams.get('to')   || url.searchParams.get('dateTo')   || url.searchParams.get('checkout');
+    if (from && to) {
+      const a = new Date(from), b = new Date(to);
+      if (!isNaN(a) && !isNaN(b)) {
+        const diff = Math.max(1, Math.round((b - a) / 86400000));
+        return { from: from.slice(0,10), nights: diff };
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function extractPropertyId(input) {
+  const s = (input||'').trim();
+  if (!s) return null;
+  if (/^\d{3,10}$/.test(s)) return s;
+  try {
+    const url = new URL(s);
+    const m1 = url.pathname.match(/\/p\/(\d+)(?:\/|$)/);
+    if (m1) return m1[1];
+    const m2 = url.pathname.match(/hosteldetails\.php\/[\w-]+\/[\w-]+\/(\d+)(?:\/|$)/i);
+    if (m2) return m2[1];
+    const parts = url.pathname.split('/').filter(Boolean);
+    const lastNum = parts.map(p=>p.match(/^(\d{3,10})$/)).filter(Boolean).pop();
+    if (lastNum) return lastNum[1];
+  } catch {}
+  return null;
+}
+
+function showStatus(msg, type='info') {
+  const box = document.getElementById('statusBox');
+  box.classList.remove('hidden');
+  box.classList.toggle('bg-amber-50', type==='info');
+  box.classList.toggle('border-amber-200', type==='info');
+  box.classList.toggle('text-amber-900', type==='info');
+  box.classList.toggle('dark:bg-amber-900/20', type==='info');
+  box.classList.toggle('dark:border-amber-900/40', type==='info');
+  box.classList.toggle('dark:text-amber-200', type==='info');
+  box.classList.toggle('bg-red-50', type==='error');
+  box.classList.toggle('border-red-200', type==='error');
+  box.classList.toggle('text-red-900', type==='error');
+  box.classList.toggle('dark:bg-red-900/20', type==='error');
+  box.classList.toggle('dark:border-red-900/40', type==='error');
+  box.classList.toggle('dark:text-red-200', type==='error');
+  box.innerText = msg;
+}
+function hideStatus(){ document.getElementById('statusBox').classList.add('hidden'); }
+
+// ===== CSV loading =====
+async function fetchCsvForProperty(propertyId) {
+  const candidates = [
+    `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/refs/heads/main/${propertyId}.csv`,
+    `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/main/${propertyId}.csv`,
+    `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/refs/heads/main/${propertyId}_prices_history.csv`,
+    `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/main/${propertyId}_prices_history.csv`,
+  ];
+  let lastErr = null;
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const text = await res.text();
+      const parsed = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
+      if (!parsed.data || !parsed.data.length) throw new Error('Empty CSV');
+      return { rows: parsed.data, sourceUrl: url };
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('CSV not found');
+}
+
+// ===== Transformations =====
+function normalizeRows(rows) {
+  return rows.map(r => ({
+    dormId: String(r.dormId ?? r.dorm_id ?? r.dorm ?? ''),
+    ratePlan: String(r.ratePlan ?? r.rate_plan ?? ''),
+    date: String(r.date ?? '').slice(0,10),
+    priceValue: Number(r.priceValue ?? r.price_value ?? r.price),
+    priceCurrency: String(r.priceCurrency ?? r.currency ?? 'AUD'),
+    crawledAt: Number(r.crawledAt ?? r.crawled_at ?? r.crawl_ts),
+    urlPart: r.urlPart ? String(r.urlPart) : ''
+  })).filter(r => r.dormId && r.date && Number.isFinite(r.priceValue) && Number.isFinite(r.crawledAt));
+}
+
+function groupBy(arr, keyFn) {
+  const m = new Map();
+  for (const it of arr) {
+    const k = keyFn(it);
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(it);
+  }
+  return m;
+}
+
+// ===== Dorm name resolution via raw-data JSON =====
+async function fetchDormNamesFromRows(rows, propertyId) {
+  try {
+    const latest = rows.reduce((a,b)=> (!a || (b.crawledAt > a.crawledAt) ? b : a), null);
+    if (!latest || !latest.urlPart) return new Map();
+    const baseCandidates = [
+      `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/refs/heads/raw-data/raw/${latest.urlPart}`,
+      `https://raw.githubusercontent.com/adverbdizzy7d/HW-AUS/raw-data/raw/${latest.urlPart}`,
+    ];
+    let json = null, lastErr = null;
+    for (const u of baseCandidates) {
+      try {
+        const res = await fetch(u, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        json = await res.json();
+        break;
+      } catch(e){ lastErr = e; }
+    }
+    if (!json) throw lastErr || new Error('raw-data JSON not found');
+    const map = new Map();
+    // Typical layout: json.rooms.dorms[] with { id, name }
+    const dorms = json?.rooms?.dorms || [];
+    for (const d of dorms) {
+      const name = d.name || d.roomName || d.title || `Dorm ${d.id}`;
+      if (d.id) map.set(String(d.id), String(name));
+    }
+    return map;
+  } catch (e) {
+    console.warn('Failed to resolve dorm names from raw JSON', e);
+    return new Map();
+  }
+}
+
+// ===== With check-in: build time-series per crawl =====
+function seriesForStay(rows, stayDates) {
+  const byDorm = groupBy(rows.filter(r => stayDates.has(r.date)), r => r.dormId);
+  const out = [];
+  for (const [dormId, items] of byDorm) {
+    const byCrawl = groupBy(items, r => r.crawledAt);
+    const points = [];
+    for (const [crawlTs, list] of byCrawl) {
+      const byDate = groupBy(list, r => r.date);
+      let total = 0;
+      let currency = list[0].priceCurrency || 'AUD';
+      for (const [dt, entries] of byDate) {
+        const minForDate = Math.min(...entries.map(e => e.priceValue));
+        total += minForDate;
+      }
+      points.push({ x: new Date(Number(crawlTs)*1000), y: total, currency });
+    }
+    points.sort((a,b)=>a.x - b.x);
+    const ys = points.map(p=>p.y);
+    out.push({ dormId, points, min: Math.min(...ys), max: Math.max(...ys), first: points[0]?.y ?? NaN, last: points.at(-1)?.y ?? NaN, currency: points[0]?.currency || 'AUD' });
+  }
+  return out.sort((a,b)=> a.dormId.localeCompare(b.dormId));
+}
+
+// ===== Without check-in: 14-day min/max per date =====
+function minMaxNext14(rows) {
+  const today = new Date();
+  today.setHours(0,0,0,0);
+  const startStr = toDateStr(today);
+  const days = Array.from({length:14}, (_,i)=> addDaysStr(startStr, i));
+
+  const byDorm = groupBy(rows.filter(r => days.includes(r.date)), r => r.dormId);
+  const byDormOut = new Map();
+  for (const [dormId, items] of byDorm) {
+    const byDate = groupBy(items, r => r.date);
+    const rowsOut = [];
+    for (const dStr of days) {
+      const list = byDate.get(dStr) || [];
+      if (!list.length) { rowsOut.push({ date: dStr, min: NaN, max: NaN, currency: 'AUD' }); continue; }
+      const vals = list.map(e => e.priceValue);
+      const min = Math.min(...vals), max = Math.max(...vals);
+      const currency = list[0].priceCurrency || 'AUD';
+      rowsOut.push({ date: dStr, min, max, currency });
+    }
+    byDormOut.set(dormId, rowsOut);
+  }
+  return { days, byDorm: byDormOut };
+}
+
+// ===== Charts with robust auto-scaling =====
+let crawlChart, spanChart;
+function computeYDomainFromArrays(arrays) {
+  const values = arrays.flat().filter(v => Number.isFinite(v));
+  if (!values.length) return { min: 0, max: 1 };
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  if (min === max) {
+    const pad = Math.max(1, Math.abs(max) * 0.05);
+    return { min: min - pad, max: max + pad };
+  }
+  const pad = (max - min) * 0.06;
+  return { min: min - pad, max: max + pad };
+}
+
+function renderCrawlChart(series, dormNames) {
+  const ctx = document.getElementById('crawlChart').getContext('2d');
+  if (crawlChart) { crawlChart.destroy(); }
+  const datasets = series.map(s => ({
+    label: dormNames.get(String(s.dormId)) || `Dorm ${s.dormId}`,
+    data: s.points.map(p => ({ x: p.x, y: p.y })),
+    fill: false,
+    tension: 0.25,
+  }));
+  const currency = series[0]?.currency || 'AUD';
+  const domain = computeYDomainFromArrays(datasets.map(d => d.data.map(p => p.y)));
+  crawlChart = new Chart(ctx, {
+    type: 'line',
+    data: { datasets },
+    options: {
+      maintainAspectRatio: false,
+      responsive: true,
+      interaction: { mode: 'nearest', intersect: false },
+      plugins: {
+        legend: { position: 'bottom' },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${fmtMoney(ctx.parsed.y, currency)} @ ${new Date(ctx.parsed.x).toLocaleString(userLocale)}` } }
+      },
+      scales: {
+        x: { type: 'time', time: { tooltipFormat: 'PP HH:mm' } },
+        y: { min: domain.min, max: domain.max, ticks: { callback: (v)=>fmtMoney(v, currency) } }
+      }
+    }
+  });
+}
+
+function renderSpanChart(dayRows, dormId, dormName) {
+  const ctx = document.getElementById('spanChart').getContext('2d');
+  if (spanChart) { spanChart.destroy(); }
+  const labels = dayRows.map(r => r.date);
+  const minVals = dayRows.map(r => r.min);
+  const maxVals = dayRows.map(r => r.max);
+  const currency = dayRows[0]?.currency || 'AUD';
+  const domain = computeYDomainFromArrays([minVals, maxVals]);
+  spanChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [
+      { label: `Min (${dormName})`, data: minVals, spanGaps: true, tension: 0.25 },
+      { label: `Max (${dormName})`, data: maxVals, spanGaps: true, tension: 0.25 },
+    ]},
+    options: {
+      maintainAspectRatio: false,
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'bottom' },
+        tooltip: { callbacks: { label: (ctx)=> `${ctx.dataset.label}: ${fmtMoney(ctx.parsed.y, currency)}` } }
+      },
+      scales: { y: { min: domain.min, max: domain.max, ticks: { callback: (v)=>fmtMoney(v, currency) } } }
+    }
+  });
+}
+
+// ===== Tables =====
+function renderWithDatesTable(series, dormNames) {
+  const tb = document.getElementById('withDatesTable');
+  tb.innerHTML = '';
+  for (const s of series) {
+    const tr = document.createElement('tr');
+    const label = dormNames.get(String(s.dormId)) || `Dorm ${s.dormId}`;
+    tr.innerHTML = `
+      <td class="p-2">${label}</td>
+      <td class="p-2 text-right">${fmtMoney(s.min, s.currency)}</td>
+      <td class="p-2 text-right">${fmtMoney(s.max, s.currency)}</td>
+      <td class="p-2 text-right">${fmtMoney(s.last, s.currency)}</td>
+      <td class="p-2 text-right">${fmtMoney(s.first, s.currency)}</td>
+    `;
+    tb.appendChild(tr);
+  }
+}
+
+function renderNoDatesTable(rows) {
+  const tb = document.getElementById('noDatesTable');
+  tb.innerHTML = '';
+  for (const r of rows) {
+    const span = (Number.isFinite(r.min) && Number.isFinite(r.max)) ? (r.max - r.min) : NaN;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="p-2">${r.date}</td>
+      <td class="p-2 text-right">${fmtMoney(r.min, r.currency)}</td>
+      <td class="p-2 text-right">${fmtMoney(r.max, r.currency)}</td>
+      <td class="p-2 text-right">${Number.isFinite(span) ? fmtMoney(span, r.currency) : '–'}</td>
+    `;
+    tb.appendChild(tr);
+  }
+}
+
+// ===== URL helpers (deep-links) =====
+function updateQueryString({ id, from, nights }) {
+  const q = new URLSearchParams(window.location.search);
+  q.set('id', id);
+  if (from) {
+    q.set('from', from);
+    if (nights) q.set('nights', String(nights));
+    q.delete('to'); // avoid ambiguity
+  } else {
+    q.delete('from'); q.delete('to'); q.delete('nights');
+  }
+  const newUrl = `${location.pathname}?${q.toString()}`;
+  history.replaceState(null, '', newUrl);
+}
+
+function bootstrapFromQuery() {
+  try {
+    const q = new URLSearchParams(location.search);
+    const id = q.get('id');
+    const from = q.get('from');
+    const to = q.get('to');
+    const nights = q.get('nights');
+    if (id) document.getElementById('urlInput').value = id;
+    if (from && to) {
+      const a = new Date(from), b = new Date(to);
+      if (!isNaN(a) && !isNaN(b)) {
+        document.getElementById('checkin').value = from.slice(0,10);
+        const diff = Math.max(1, Math.round((b - a) / 86400000));
+        document.getElementById('nights').value = diff;
+      }
+    } else if (from && nights) {
+      document.getElementById('checkin').value = from.slice(0,10);
+      document.getElementById('nights').value = Math.max(1, Number(nights)||1);
+    }
+    if (id) { runAnalysis(); }
+  } catch {}
+}
+
+// ===== Main flow =====
+let lastDormNames = new Map();
+
+async function runAnalysis() {
+  hideStatus();
+  document.getElementById('withDates').classList.add('hidden');
+  document.getElementById('noDates').classList.add('hidden');
+  document.getElementById('summary').classList.add('hidden');
+
+  const input = document.getElementById('urlInput').value.trim();
+  const checkin = document.getElementById('checkin').value;
+  const nights = Number(document.getElementById('nights').value || '1');
+
+  // If a Hostelworld URL has dates, auto-fill
+  if (input) {
+    const auto = parseUrlForDates(input);
+    if (auto && !checkin) {
+      document.getElementById('checkin').value = auto.from;
+      document.getElementById('nights').value = auto.nights;
+    }
+  }
+  const effectiveCheckin = document.getElementById('checkin').value;
+  const effectiveNights = Number(document.getElementById('nights').value || '1');
+
+  const propertyId = extractPropertyId(input);
+  if (!propertyId) {
+    showStatus('Could not extract a Property ID. Please enter a valid Hostelworld URL or a numeric ID.', 'error');
+    return;
+  }
+
+  showStatus('Loading CSV …');
+  let rows, sourceUrl;
+  try {
+    const res = await fetchCsvForProperty(propertyId);
+    rows = normalizeRows(res.rows);
+    sourceUrl = res.sourceUrl;
+  } catch (e) {
+    console.error(e);
+    showStatus(`CSV could not be loaded for property ${propertyId}. Make sure the file exists in the repository.\nError: ${e.message}`, 'error');
+    return;
+  }
+  hideStatus();
+
+  // Summary box
+  const currency = rows[0]?.priceCurrency || 'AUD';
+  document.getElementById('sumPropertyId').innerText = propertyId;
+  document.getElementById('sumCurrency').innerText = currency;
+  document.getElementById('sumRows').innerText = rows.length.toLocaleString(userLocale);
+  const link = document.getElementById('sumSourceLink');
+  link.href = sourceUrl;
+  link.textContent = sourceUrl.replace('https://raw.githubusercontent.com/','');
+  document.getElementById('summary').classList.remove('hidden');
+
+  // Resolve dorm names from latest raw-data JSON (best-effort)
+  lastDormNames = await fetchDormNamesFromRows(rows, propertyId);
+
+  // Update URL for refresh/share
+  if (effectiveCheckin) {
+    updateQueryString({ id: propertyId, from: effectiveCheckin, nights: effectiveNights });
+  } else {
+    updateQueryString({ id: propertyId });
+  }
+
+  // Branch by check-in
+  if (effectiveCheckin) {
+    const stayDates = new Set(rangeDates(effectiveCheckin, effectiveNights));
+    const series = seriesForStay(rows, stayDates);
+    if (!series.length) {
+      showStatus('No matching records for the selected date range. Try a different stay.', 'info');
+    }
+    renderCrawlChart(series, lastDormNames);
+    renderWithDatesTable(series, lastDormNames);
+    document.getElementById('withDates').classList.remove('hidden');
+  } else {
+    const agg = minMaxNext14(rows);
+    const dormIds = Array.from(agg.byDorm.keys()).sort();
+    const select = document.getElementById('dormSelect');
+    select.innerHTML = '';
+    for (const d of dormIds) {
+      const label = lastDormNames.get(String(d)) || `Dorm ${d}`;
+      const opt = document.createElement('option');
+      opt.value = d; opt.textContent = label;
+      select.appendChild(opt);
+    }
+    const pick = dormIds[0];
+    if (!pick) {
+      showStatus('No records for the next 14 days were found.', 'info');
+      return;
+    }
+    const rowsForDorm = agg.byDorm.get(pick);
+    const label = lastDormNames.get(String(pick)) || `Dorm ${pick}`;
+    renderSpanChart(rowsForDorm, pick, label);
+    renderNoDatesTable(rowsForDorm);
+    document.getElementById('noDates').classList.remove('hidden');
+
+    select.onchange = () => {
+      const d = select.value;
+      const r = agg.byDorm.get(d) || [];
+      const lbl = lastDormNames.get(String(d)) || `Dorm ${d}`;
+      renderSpanChart(r, d, lbl);  // will recompute Y-domain so the graph isn't squashed
+      renderNoDatesTable(r);
+    };
+  }
+}
+
+// Init
+const form = document.getElementById('inputForm');
+form.addEventListener('submit', (e) => { e.preventDefault(); runAnalysis(); });
+bootstrapFromQuery();
+</script>
 </body>
 </html>
